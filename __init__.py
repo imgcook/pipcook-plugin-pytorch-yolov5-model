@@ -2,14 +2,18 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__)))
 
+import cv2
 import yaml
 import logging
 import requests
 import torch
+import numpy as np
 from pathlib import Path
 
 from models.yolo import Model
 from utils.torch_utils import select_device, intersect_dicts
+from utils.datasets import letterbox
+from utils.general import scale_coords
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +35,7 @@ def download(url, folderpath, filepath):
   with open(os.path.join(folderpath, filepath), 'wb+') as f:
     f.write(r.content)
 
-def define(hyp, opt, device):
+def define(hyp, opt, device, recoverPath):
   logger.info(f'Hyperparameters {hyp}')
   log_dir = './evolve'
 
@@ -43,10 +47,13 @@ def define(hyp, opt, device):
 
   
   weights = opt.weights
-  modelPath = os.path.join(BASE_PATH, opt.weights)
-  modelDownloadUrl = os.path.join(MODEL_URL, opt.weights)
-  if not os.path.exists(modelPath):
-    download(modelDownloadUrl, BASE_PATH, opt.weights)
+  if recoverPath:
+    modelPath = recoverPath
+  else:
+    modelPath = os.path.join(BASE_PATH, opt.weights)
+    modelDownloadUrl = os.path.join(MODEL_URL, opt.weights)
+    if not os.path.exists(modelPath):
+      download(modelDownloadUrl, BASE_PATH, opt.weights)
 
   ckpt = torch.load(modelPath, map_location=device)
   if hyp.get('anchors'):
@@ -68,17 +75,36 @@ def main(data, args):
   opt.nc = len(vars(data.metadata.labelMap))
   opt.weights = 'yolov5s.pt'
   opt.cfg = 'yolov5s.yaml'
+  opt.img_size = [640, 640] if not hasattr(args, 'imgSize') else args.imgSize
+  recoverPath = None if not hasattr(args, 'recoverPath') else args.recoverPath
 
   with open(opt.hyp) as f:
       hyp = yaml.load(f, Loader=yaml.FullLoader)
   device = select_device(opt.device, batch_size=opt.batch_size)
-  yolov5, ckpt = define(hyp, opt, device)
-  sys.path.pop()
-  sys.path.pop()
+  yolov5, ckpt = define(hyp, opt, device, recoverPath)
+  half = device.type != 'cpu'
   class PipcookModel:
     model = yolov5
     config = {
-      "ckpt": ckpt
+      "ckpt": ckpt,
+      "img_size": opt.img_size
     }
+    def predict(self, inputData):
+      img_origin = cv2.imread(inputData.data)
+      img = letterbox(img0, new_shape=opt.img_size)[0]
+      # Convert
+      img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
+      img = np.ascontiguousarray(img)
+      img = img.half() if half else img.float()  # uint8 to fp16/32
+      img /= 255.0  # 0 - 255 to 0.0 - 1.0
+      if img.ndimension() == 3:
+          img = img.unsqueeze(0)
 
+      # Inference
+      pred = model(img)[0]
+      pred = non_max_suppression(pred, 0.25, 0.45)
+      print('=====pred', pred)
+      return pred
+  sys.path.pop()
+  sys.path.pop()
   return PipcookModel()
