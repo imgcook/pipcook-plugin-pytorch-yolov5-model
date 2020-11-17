@@ -1,4 +1,5 @@
 import cv2
+import numpy as np
 
 def letterbox(img, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True):
     # Resize image to a 32-pixel-multiple rectangle https://github.com/ultralytics/yolov3/issues/232
