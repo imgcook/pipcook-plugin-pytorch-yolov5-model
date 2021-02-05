@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 from models.yolo import Model
+from models.experimental import attempt_load
 from utils.torch_utils import select_device, intersect_dicts
 from utils.datasets import letterbox
 from utils.general import scale_coords, non_max_suppression
@@ -59,13 +60,14 @@ def define(hyp, opt, device, recoverPath):
   ckpt = torch.load(modelPath, map_location=device)
   if hyp.get('anchors'):
       ckpt['model'].yaml['anchors'] = round(hyp['anchors'])
+  predict_model = attempt_load(modelPath, map_location=device)
   model = Model(os.path.join(os.path.dirname(__file__), 'models', 'yolov5s.yaml'), ch=3, nc=opt.nc).to(device)
   exclude = ['anchor']
   state_dict = ckpt['model'].float().state_dict()  # to FP32
   state_dict = intersect_dicts(state_dict, model.state_dict(), exclude=exclude)  # intersect
   model.load_state_dict(state_dict, strict=False)
   logger.info('Transferred %g/%g items from %s' % (len(state_dict), len(model.state_dict()), weights))  # report
-  return model, ckpt
+  return model, predict_model, ckpt
 
 def main(data, args):
   opt = obj({})
@@ -88,10 +90,11 @@ def main(data, args):
   with open(opt.hyp) as f:
       hyp = yaml.load(f, Loader=yaml.FullLoader)
   device = select_device(opt.device, batch_size=opt.batch_size)
-  yolov5, ckpt = define(hyp, opt, device, recoverPath)
+  yolov5, predict_model, ckpt = define(hyp, opt, device, recoverPath)
   half = device.type != 'cpu'
   class PipcookModel:
     model = yolov5
+    p_model = predict_model
     config = {
       "ckpt": ckpt,
       "img_size": opt.img_size
@@ -109,9 +112,26 @@ def main(data, args):
           img = img.unsqueeze(0)
 
       # Inference
-      pred = self.model(img)[0]
+      pred = self.p_model(img)[0]
       pred = non_max_suppression(pred, 0.25, 0.45)
-      return pred
+      
+      # Parse Inference
+      boxes = []
+      classes = []
+      scores = []
+      for i, det in enumerate(pred):  # detections per image
+        # Write results
+        for *xyxy, conf, cls in reversed(det):
+          boxes.append([int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])])
+          classes.append(int(cls))
+          scores.append(float(conf))
+      output = {
+        'boxes': boxes,
+        'classes': classes,
+        'scores': scores
+      }
+      return output
+
   sys.path.pop()
   sys.path.pop()
   return PipcookModel()
